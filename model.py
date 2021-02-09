@@ -141,13 +141,12 @@ class GatedAttention(nn.Module):
         H_attn = torch.bmm(ctx2nodes, graph_rep)  # (B, N, M) x (B, M, H) = (B, N, H)
         ctx_graph = torch.cat((context_rep, H_attn), dim=-1)
         gated1 = F.sigmoid(self.gate_linear(ctx_graph))  # (B, N, 2H) ; (B, N, H) = (B, N, 3H)
-        gated2 = F.tanh(self.gate_linear(ctx_graph))  # (B, N, 2H) ; (B, N, H) = (B, N, 3H)
+        gated2 = torch.tanh(self.gate_linear(ctx_graph))  # (B, N, 2H) ; (B, N, H) = (B, N, 3H)
         G = gated1 * gated2
         # print("gated1: ", gated1.shape)
         # print("gated2: ", gated2.shape)
         # print("G: ", G.shape)
         return G
-
 
 
 class NumericHGN(nn.Module):
@@ -162,11 +161,18 @@ class NumericHGN(nn.Module):
         self.para_node_mlp = nn.Linear(self.config.hidden_size * 2, self.config.hidden_size)
         self.sent_node_mlp = nn.Linear(self.config.hidden_size * 2, self.config.hidden_size)
         self.ent_node_mlp = nn.Linear(self.config.hidden_size * 2, self.config.hidden_size)
-        
+
+
         # https://docs.dgl.ai/api/python/nn.pytorch.html#dgl.nn.pytorch.HeteroGraphConv
         self.gat = dglnn.HeteroGraphConv({
             "ps" : dglnn.GATConv(self.config.hidden_size, self.config.hidden_size, num_heads=1),
+            "sp" : dglnn.GATConv(self.config.hidden_size, self.config.hidden_size, num_heads=1),
             "se" : dglnn.GATConv(self.config.hidden_size, self.config.hidden_size, num_heads=1),
+            "es" : dglnn.GATConv(self.config.hidden_size, self.config.hidden_size, num_heads=1),
+            "pp" : dglnn.GATConv(self.config.hidden_size, self.config.hidden_size, num_heads=1),
+            "ss" : dglnn.GATConv(self.config.hidden_size, self.config.hidden_size, num_heads=1),
+            "qp" : dglnn.GATConv(self.config.hidden_size, self.config.hidden_size, num_heads=1),
+            "pq" : dglnn.GATConv(self.config.hidden_size, self.config.hidden_size, num_heads=1),
             # TODO: Need (i) bi-directional edges and (ii) more edge types (e.g., question-paragraph, paragraph-paragraph, etc.)
         }, aggregate='sum')  # TODO: May need to change aggregate function (test it!) - ‘sum’, ‘max’, ‘min’, ‘mean’, ‘stack’.
 
@@ -175,9 +181,9 @@ class NumericHGN(nn.Module):
         self.para_mlp = nn.Sequential(nn.Linear(self.config.hidden_size, self.config.hidden_size), nn.Linear(self.config.hidden_size, args.num_paragraphs))
         self.sent_mlp = nn.Sequential(nn.Linear(self.config.hidden_size, self.config.hidden_size), nn.Linear(self.config.hidden_size, args.num_sentences))
         self.ent_mlp = nn.Sequential(nn.Linear(self.config.hidden_size, self.config.hidden_size), nn.Linear(self.config.hidden_size, args.num_entities))
-        self.start_mlp = nn.Sequential(nn.Linear(self.config.hidden_size, self.config.hidden_size), nn.Linear(self.config.hidden_size, args.max_seq_len))
-        self.end_mlp = nn.Sequential(nn.Linear(self.config.hidden_size, self.config.hidden_size), nn.Linear(self.config.hidden_size, args.max_seq_len))
-        self.answer_type_mlp = nn.Sequential(nn.Linear(self.config.hidden_size, self.config.hidden_size), nn.Linear(self.config.hidden_size, 3))
+        self.span_mlp = nn.Sequential(nn.Linear(self.config.hidden_size * 4, self.config.hidden_size), nn.Linear(self.config.hidden_size, self.config.num_labels))
+        # self.end_mlp = nn.Sequential(nn.Linear(self.config.hidden_size * 3, self.config.hidden_size), nn.Linear(self.config.hidden_size, args.max_seq_len))
+        self.answer_type_mlp = nn.Sequential(nn.Linear(self.config.hidden_size * 4, self.config.hidden_size), nn.Linear(self.config.hidden_size, 3))
 
     def forward(self, input_ids, attention_mask, token_type_ids, labels, graph_out, question_ends):
         '''
@@ -269,95 +275,32 @@ class NumericHGN(nn.Module):
                 graph_rep = torch.cat((graph_rep, v), dim=0)
 
         print("graph_rep (shape): ", graph_rep.shape)
-        print("g (etype): ", g.etype)
+        print("g (ntypes): ", g.ntypes)
+        print("g (etypes): ", g.etypes)
         print("g_out: ", g_out)
         print("g_out (length): ", len(g_out))
         print("g_out (keys): ", g_out.keys())
         print("g_out - entities: ", g_out["entity"].shape)
         print("g_out - sentence: ", g_out["sentence"].shape)
+        print("g_out - question: ", g_out["question"].shape)
+        print("g_out - paragraph: ", g_out["paragraph"].shape)
 
-        # Gated Attention ; TODO: Implement a separate class for gated attention mechanism
         M_perm = M.permute(1, 0, 2)
         graph_rep_perm = graph_rep.permute(1, 0, 2)
         gated_rep = self.gated_attn(M_perm, graph_rep_perm)
 
+        print("G (shape): ", gated_rep.shape)
+        start_end_logits = self.span_mlp(gated_rep)
+        print("start_end (shape): ", start_end_logits.shape)
+        print("gated_rep[0] (CLS rep): ", gated_rep.squeeze(0)[:1].shape)
 
+        start_logits, end_logits = start_end_logits.split(1, dim=-1)
+        start_logits = start_logits.squeeze(-1)
+        end_logits = end_logits.squeeze(-1)
+        print("start_logits: ", start_logits.shape)
+        print("end_logits: ", end_logits.shape)
+        answer_type_logits = self.answer_type_mlp(gated_rep.squeeze(0)[:1])
+        print("answer_type_logit (shape): ", answer_type_logits.shape)
 
-class BiDAF(nn.Module):
-    def __init__(self, args):
-        super(BiDAF, self).__init__()
-        self.embd_size = args.w_embd_size
-        self.d = self.embd_size * 2 # word_embedding + char_embedding
-        # self.d = self.embd_size # only word_embedding
-
-        self.char_embd_net = CharEmbedding(args)
-        self.word_embd_net = WordEmbedding(args)
-        self.highway_net = Highway(self.d)
-        self.ctx_embd_layer = nn.GRU(self.d, self.d, bidirectional=True, dropout=0.2, batch_first=True)
-
-        self.W = nn.Linear(6*self.d, 1, bias=False)
-
-        self.modeling_layer = nn.GRU(8*self.d, self.d, num_layers=2, bidirectional=True, dropout=0.2, batch_first=True)
-
-        self.p1_layer = nn.Linear(10*self.d, 1, bias=False)
-        self.p2_lstm_layer = nn.GRU(2*self.d, self.d, bidirectional=True, dropout=0.2, batch_first=True)
-        self.p2_layer = nn.Linear(10*self.d, 1)
-
-    def build_contextual_embd(self, x_c, x_w):
-        # 1. Caracter Embedding Layer
-        char_embd = self.char_embd_net(x_c) # (N, seq_len, embd_size)
-        # 2. Word Embedding Layer
-        word_embd = self.word_embd_net(x_w) # (N, seq_len, embd_size)
-        # Highway Networks for 1. and 2.
-        embd = torch.cat((char_embd, word_embd), 2) # (N, seq_len, d=embd_size*2)
-        embd = self.highway_net(embd) # (N, seq_len, d=embd_size*2)
-
-        # 3. Contextual  Embedding Layer
-        ctx_embd_out, _h = self.ctx_embd_layer(embd)
-        return ctx_embd_out
-
-    def forward(self, ctx_w, ctx_c, query_w, query_c):
-        batch_size = ctx_w.size(0)
-        T = ctx_w.size(1)   # context sentence length (word level)
-        J = query_w.size(1) # query sentence length   (word level)
-
-        # 1. Caracter Embedding Layer
-        # 2. Word Embedding Layer
-        # 3. Contextual  Embedding Layer
-        embd_context = self.build_contextual_embd(ctx_c, ctx_w)     # (N, T, 2d)
-        embd_query   = self.build_contextual_embd(query_c, query_w) # (N, J, 2d)
-
-        # 4. Attention Flow Layer
-        # Make a similarity matrix
-        shape = (batch_size, T, J, 2*self.d)            # (N, T, J, 2d)
-        embd_context_ex = embd_context.unsqueeze(2)     # (N, T, 1, 2d)
-        embd_context_ex = embd_context_ex.expand(shape) # (N, T, J, 2d)
-        embd_query_ex = embd_query.unsqueeze(1)         # (N, 1, J, 2d)
-        embd_query_ex = embd_query_ex.expand(shape)     # (N, T, J, 2d)
-        a_elmwise_mul_b = torch.mul(embd_context_ex, embd_query_ex) # (N, T, J, 2d)
-        cat_data = torch.cat((embd_context_ex, embd_query_ex, a_elmwise_mul_b), 3) # (N, T, J, 6d), [h;u;h◦u]
-        S = self.W(cat_data).view(batch_size, T, J) # (N, T, J)
-
-        # Context2Query
-        c2q = torch.bmm(F.softmax(S, dim=-1), embd_query) # (N, T, 2d) = bmm( (N, T, J), (N, J, 2d) )
-        # Query2Context
-        # b: attention weights on the context
-        b = F.softmax(torch.max(S, 2)[0], dim=-1) # (N, T)
-        q2c = torch.bmm(b.unsqueeze(1), embd_context) # (N, 1, 2d) = bmm( (N, 1, T), (N, T, 2d) )
-        q2c = q2c.repeat(1, T, 1) # (N, T, 2d), tiled T times
-
-        # G: query aware representation of each context word
-        G = torch.cat((embd_context, c2q, embd_context.mul(c2q), embd_context.mul(q2c)), 2) # (N, T, 8d)
-
-        # 5. Modeling Layer
-        M, _h = self.modeling_layer(G) # M: (N, T, 2d)
-
-        # 6. Output Layer
-        G_M = torch.cat((G, M), 2) # (N, T, 10d)
-        p1 = F.softmax(self.p1_layer(G_M).squeeze(), dim=-1) # (N, T)
-
-        M2, _ = self.p2_lstm_layer(M) # (N, T, 2d)
-        G_M2 = torch.cat((G, M2), 2) # (N, T, 10d)
-        p2 = F.softmax(self.p2_layer(G_M2).squeeze(), dim=-1) # (N, T)
-
-        return p1, p2
+        loss_span = loss_type = loss_para = loss_sent = loss_ent = 0.0
+        loss_fct = nn.CrossEntropyLoss()
