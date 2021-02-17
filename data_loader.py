@@ -55,16 +55,16 @@ class HotpotExample(object):
 class HotpotFeatures(object):
     """A single set of features of data."""
 
-    def __init__(self, input_ids, attention_mask, token_type_ids, node_idx, span_dict, para_lbl, sent_lbl, span_idx, answer_type_lbl):
+    def __init__(self, input_ids, attention_mask, token_type_ids, node_indices, span_dict, para_lbl, sent_lbl, span_idx, answer_type_lbl):
         self.input_ids = input_ids
         self.attention_mask = attention_mask
         self.token_type_ids = token_type_ids
-        self.node_idx = node_idx  # Dict[Dict[List]]: {Para_idx1: {sent_idx1: {ent_idx1, ent_idx2, ...}, sent_idx2: {...}}, Para_idx2: {...}}
-        self.span_dict = span_dict  # Dict[List[Tuples]]: start_idx & end_idx for each paragraph, sentence, and entity ({"paragraph":[(p1_start, p1_end)], "sentence":[(s1_start, s1_end), (...)]})
+        self.node_indices = node_indices  # `node_idx`: Dict[Dict[List]]: {Para_idx1: {sent_idx1: {ent_idx1, ent_idx2, ...}, sent_idx2: {...}}, Para_idx2: {...}}
+        self.span_dict = span_dict  # `span_dict`: Dict[List[Tuples]]: start_idx & end_idx for each paragraph, sentence, and entity ({"paragraph":[(p1_start, p1_end)], "sentence":[(s1_start, s1_end), (...)]})
         self.para_lbl = para_lbl
         self.sent_lbl = sent_lbl
         self.span_idx = span_idx  # (start_idx, end_idx)
-        self.answer_type_lbl = answer_type_lbl
+        self.answer_type_lbl = answer_type_lbl  # `answer_type_lbl`: [span, entity, yes/no]
 
     def __repr__(self):
         delineate = "#" * 50
@@ -126,8 +126,7 @@ class HotpotProcessor(object):
             level = row["level"]
             _id = row["_id"]
             _type = row["type"]
-            # print("Text >> {}".format(text))
-            # print("Label >> {} ".format(deceptive))
+
             if i % 1000 == 0:
                 logger.info(row)
             examples.append(HotpotExample(sup_facts=sup_facts, question=question, context=context, answer=answer, level=level, _id=_id, _type=_type))
@@ -152,8 +151,8 @@ class HotpotProcessor(object):
 
 
 processors = {
-    "para_select": HotpotProcessor,  # Distractor setting
-    "train_model": HotpotProcessor,
+    "para_select": HotpotProcessor,
+    "train_model": HotpotProcessor,  # Distractor setting
     # TODO: Need another processor for `Full-wiki setting`
 }
 
@@ -313,6 +312,7 @@ def convert_examples_to_features(args, examples, max_seq_len, tokenizer,
             question_tokens = tokenizer.tokenize(example.question)
             question_span = [(question_start, len(question_tokens) + 2)]  # `2` accounts for [CLS] and [SEP] appended later
 
+            # Assign `node_idx` and extract `spans` of paragraph, sentence and entity
             for i, para in enumerate(context_selected):
                 node_idx[i] = defaultdict(list)
                 para_seq = tokenizer.tokenize(''.join(para))
@@ -337,14 +337,23 @@ def convert_examples_to_features(args, examples, max_seq_len, tokenizer,
                         ent_idx += 1
                     sent_idx += 1
                     sent_start += len(sent_seq)
+
+            assert len(all_ent_list) == ent_idx
+            all_ent_dict = dict(zip(all_ent_list, list(range(ent_idx))))  # `all_ent_dict` to assign ent_idx to question node
+            q_idx = 0
+            q2ent = defaultdict(list)
+            for entity in all_ent_list:
+                if entity in example.question.lower():
+                    q2ent[q_idx].append(all_ent_dict[entity])
             
             span_dict = {"question": question_span, "paragraph": para_span_list, "sentence": sent_span_list, "entity": ent_span_list}
-
+            node_indices = (q2ent, node_idx)
             # print("Question span : {}".format(question_span))
             # print("Paragraph span : {}".format(para_span_list))
             # print("Sentence span : {}".format(sent_span_list))
             # print("Entity span : {}".format(ent_span_list))
             # print("Node_idx : {}".format(node_idx))
+            # print("q2ent: {}".format(q2ent))
             # print("Paragraph sequence: {}" .format(para_seq[para_span_list[0][0]:para_span_list[0][1]]))
             # print("Entities: {}" .format(sent_seq[ent_span_list[0][0]:ent_span_list[0][1]]))
 
@@ -385,15 +394,14 @@ def convert_examples_to_features(args, examples, max_seq_len, tokenizer,
             context = ' '.join([''.join(c) for c in context_selected])
             
             # `answer_type_lbl`: [span, entity, yes/no]
-            answer_type_lbl = [0] * 3
             # `span_idx` for answer within the given context of length "n"
             if (example.answer.lower() in ["yes", "no"]) and (example._type == "comparison"):
-                answer_type_lbl[2] = 1  # Yes/no type
+                answer_type_lbl = 2  # Yes/no type
             else:
                 if (example.answer in context) and (example.answer.lower() in all_ent_list):
-                    answer_type_lbl[1] = 1  # Entity type
+                    answer_type_lbl = 1  # Entity type
                 else:
-                    answer_type_lbl[0] = 1  # Span type
+                    answer_type_lbl = 0  # Span type
                 answer_tok = tokenizer.tokenize(example.answer)
                 context_tok = tokenizer.tokenize(context)
                 for sub_i in range(len(context_tok) - len(answer_tok)):
@@ -461,7 +469,7 @@ def convert_examples_to_features(args, examples, max_seq_len, tokenizer,
                     input_ids=input_ids,
                     attention_mask=attention_mask,
                     token_type_ids=token_type_ids,
-                    node_idx=node_idx,
+                    node_indices=node_indices,
                     span_dict=span_dict,
                     para_lbl=para_lbl,
                     sent_lbl=sent_lbl,
@@ -472,12 +480,12 @@ def convert_examples_to_features(args, examples, max_seq_len, tokenizer,
     return features
 
 
-def graph_constructor(args, node_idx, span_dict):
+def graph_constructor(args, node_indices, span_dict):
     '''
     Args
     
     args : Model argument
-    node_idx : Index for paragraph, sentence and entity nodes
+    node_indices : Tuple of index dicts for question, paragraph, sentence and entity nodes
     span_dict : Span for paragraph, sentence and entity nodes
 
     ----------
@@ -485,6 +493,7 @@ def graph_constructor(args, node_idx, span_dict):
     node_idx : Dict[Dict[List]]: {Para_idx1: {sent_idx1: {ent_idx1, ent_idx2, ...}, sent_idx2: {...}}, Para_idx2: {...}}
 
     '''
+    q2ent, node_idx = node_indices
     # The edges should be bi-directional
     ps = ("paragraph", "ps", "sentence")
     sp = ("sentence", "sp", "paragraph")
@@ -505,6 +514,7 @@ def graph_constructor(args, node_idx, span_dict):
     q2p = []
     p2p = []
     s2s = []
+    q2e = []
 
     para_idx_list, sent2ent = map(list, zip(*node_idx.items()))
     question_idx = 0
@@ -518,6 +528,13 @@ def graph_constructor(args, node_idx, span_dict):
         s2e += [(s, e) for s, e_list in sent2ent[i].items() for e in e_list]
         s_idx = list(sent2ent[i].keys())
         s2s += [(s_idx[i], s_idx[i + 1]) for i in range(len(s_idx) - 1)]
+
+    if len(q2ent) > 0:
+        q_idx = list(q2ent.keys())
+        assert len(q_idx) == 1
+        ent_list = list(q2ent.values())[0]
+        q_idx_list = q_idx * len(ent_list)
+        q2e += list(zip(q_idx_list, ent_list))
         
     data_dict[ps] = p2s
     data_dict[sp] = [t[::-1] for t in p2s]
@@ -528,6 +545,8 @@ def graph_constructor(args, node_idx, span_dict):
     data_dict[pp] = p2p
     data_dict[ss] = s2s
     data_dict[ss] += [t[::-1] for t in s2s]
+    data_dict[qe] = q2e
+    data_dict[eq] = [t[::-1] for t in q2e]
 
     g = dgl.heterograph(data_dict, device=device)
     graph_out = (g, node_idx, span_dict)
@@ -589,13 +608,14 @@ def load_and_cache_examples(args, tokenizer, mode):
             print("para_lbl >> ", f.para_lbl)
             print("sent_lbl >> ", f.sent_lbl)
             print("Span_dict >> ", f.span_dict)
-            print("node_idx >> ", f.node_idx)
+            print("q2ent >> ", f.node_indices[0])
+            print("node_idx >> ", f.node_indices[1])
 
         all_para_lbl = torch.tensor([f.para_lbl for f in features], dtype=torch.long)
         all_sent_lbl = torch.tensor([f.sent_lbl for f in features], dtype=torch.long)
         all_answer_type_lbl = torch.tensor([f.answer_type_lbl for f in features], dtype=torch.long)
         all_span_idx = torch.tensor([f.span_idx for f in features], dtype=torch.long)
-        all_graph_out = [graph_constructor(args, f.node_idx, f.span_dict) for f in features]
+        all_graph_out = [graph_constructor(args, f.node_indices, f.span_dict) for f in features]
 
         dataset = TensorDataset(all_input_ids, all_attention_mask,
                                 all_token_type_ids, all_para_lbl, all_sent_lbl,
