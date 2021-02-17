@@ -9,7 +9,7 @@ from torch.utils.data import DataLoader, RandomSampler, SequentialSampler
 from transformers import AdamW, get_linear_schedule_with_warmup
 
 from model import NumericHGN
-from utils import compute_metrics, get_label, MODEL_CLASSES, recall, precision, f1_score, EarlyStopping
+from utils import compute_metrics, get_label, MODEL_CLASSES, f1_score, EarlyStopping
 
 logger = logging.getLogger(__name__)
 
@@ -92,32 +92,32 @@ class Trainer(object):
                     inputs['token_type_ids'] = batch[2]
                 outputs = self.model(**inputs)
 
-                loss = outputs[0]  # TODO: Multiple losses for each loss term
+                losses = outputs[0]  # TODO: Multiple losses for each loss term
 
                 if self.args.gradient_accumulation_steps > 1:
-                    loss = loss / self.args.gradient_accumulation_steps
+                    # loss = loss / self.args.gradient_accumulation_steps
+                    loss = sum(losses.values()) / self.args.gradient_accumulation_steps
 
                 loss.backward()
+                torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.args.max_grad_norm)
 
                 tr_loss += loss.item()
                 if (step + 1) % self.args.gradient_accumulation_steps == 0:
-                    torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.args.max_grad_norm)
-
                     optimizer.step()
                     scheduler.step()  # Update learning rate schedule
                     self.model.zero_grad()
                     global_step += 1
 
+                    if self.args.logger:
+                        # logger.info('Loss: %f', tr_loss / global_step)
+                        neptune.log_metric('Loss', tr_loss / global_step)
+                        # TODO: Ans F1, Sup F1, EM needed
+
                     # if self.args.logging_steps > 0 and global_step % self.args.logging_steps == 0 and self.dev_dataset is not None:
-                    #     if self.args.logger:  # Plot training loss every 100 step
-                    #         neptune.log_metric('Loss', tr_loss / step)
                     #     self.evaluate("dev")
 
                     # if self.args.save_steps > 0 and global_step % self.args.save_steps == 0:
                     #     self.save_model()
-
-                    logger.info('Loss: %f', tr_loss / global_step)
-
 
                 if 0 < self.args.max_steps < global_step:
                     epoch_iterator.close()
@@ -193,9 +193,7 @@ class Trainer(object):
         result = compute_metrics(preds, out_label_ids)
         results.update(result)
 
-        prec = precision(preds, out_label_ids)
-        rec = recall(preds, out_label_ids)
-        f1 = f1_score(preds, out_label_ids)
+        f1, prec, rec = f1_score(preds, out_label_ids)
 
         # if self.early_stopping.validate((results['loss'])):
         #     print("Early stopping... Terminating Process.")
