@@ -7,7 +7,6 @@ from torch.utils.data import TensorDataset, DataLoader, SequentialSampler
 
 from data_loader import ParagraphSelectorFeatures
 from para_select import ParagraphSelector
-# TODO: Make prediction after `model` and `trainer` are set
 
 logger = logging.getLogger(__name__)
 

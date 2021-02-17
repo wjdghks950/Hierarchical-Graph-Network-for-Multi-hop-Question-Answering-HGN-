@@ -12,7 +12,7 @@ import torch.nn as nn
 from torch.utils.data import DataLoader, RandomSampler, SequentialSampler
 from transformers import AdamW, get_linear_schedule_with_warmup, BertPreTrainedModel, BertModel
 
-from utils import compute_metrics, MODEL_CLASSES, recall, precision, f1_score, EarlyStopping
+from utils import compute_metrics, MODEL_CLASSES, f1_score, EarlyStopping
 
 logger = logging.getLogger(__name__)
 
@@ -122,12 +122,11 @@ class ParaSelectorTrainer(object):
                         acc = 0.0
 
                 loss.backward()
+                torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.args.max_grad_norm)
 
                 tr_loss += loss.item()
                 tr_acc += acc
                 if (step + 1) % self.args.gradient_accumulation_steps == 0:
-                    torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.args.max_grad_norm)
-
                     optimizer.step()
                     scheduler.step()  # Update learning rate schedule
                     self.model.zero_grad()
