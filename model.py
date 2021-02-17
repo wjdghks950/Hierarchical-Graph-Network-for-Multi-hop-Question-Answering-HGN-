@@ -173,6 +173,8 @@ class NumericHGN(nn.Module):
             "ss" : dglnn.GATConv(self.config.hidden_size, self.config.hidden_size, num_heads=1),
             "qp" : dglnn.GATConv(self.config.hidden_size, self.config.hidden_size, num_heads=1),
             "pq" : dglnn.GATConv(self.config.hidden_size, self.config.hidden_size, num_heads=1),
+            "qe" : dglnn.GATConv(self.config.hidden_size, self.config.hidden_size, num_heads=1),
+            "eq" : dglnn.GATConv(self.config.hidden_size, self.config.hidden_size, num_heads=1),
             # TODO: Need (i) bi-directional edges and (ii) more edge types (e.g., question-paragraph, paragraph-paragraph, etc.)
         }, aggregate='sum')  # TODO: May need to change aggregate function (test it!) - ‘sum’, ‘max’, ‘min’, ‘mean’, ‘stack’.
 
@@ -182,7 +184,6 @@ class NumericHGN(nn.Module):
         self.sent_mlp = nn.Sequential(nn.Linear(self.config.hidden_size, self.config.hidden_size), nn.Linear(self.config.hidden_size, args.num_sentences))
         self.ent_mlp = nn.Sequential(nn.Linear(self.config.hidden_size, self.config.hidden_size), nn.Linear(self.config.hidden_size, args.num_entities))
         self.span_mlp = nn.Sequential(nn.Linear(self.config.hidden_size * 4, self.config.hidden_size), nn.Linear(self.config.hidden_size, self.config.num_labels))
-        # self.end_mlp = nn.Sequential(nn.Linear(self.config.hidden_size * 3, self.config.hidden_size), nn.Linear(self.config.hidden_size, args.max_seq_len))
         self.answer_type_mlp = nn.Sequential(nn.Linear(self.config.hidden_size * 4, self.config.hidden_size), nn.Linear(self.config.hidden_size, 3))
 
     def forward(self, input_ids, attention_mask, token_type_ids, labels, graph_out, question_ends):
@@ -301,6 +302,27 @@ class NumericHGN(nn.Module):
         print("end_logits: ", end_logits.shape)
         answer_type_logits = self.answer_type_mlp(gated_rep.squeeze(0)[:1])
         print("answer_type_logit (shape): ", answer_type_logits.shape)
+        print("answer_type_lbl: ", answer_type_lbl)
 
-        loss_span = loss_type = loss_para = loss_sent = loss_ent = 0.0
+        ignored_index = start_logits.size(-1)
+        print("span_idx: ", span_idx)
+        start_pos, end_pos = span_idx[0].unsqueeze(-1)
+        # TODO: In https://huggingface.co/transformers/v2.10.0/_modules/transformers/modeling_bert.html#BertForQuestionAnswering
+        # TODO: Is this necessary?
+        # start_pos.clamp_(0, ignored_index)
+        # end_pos.clamp_(0, ignored_index)
+
+        losses = {}
+
+        loss_start = loss_end = loss_type = loss_para = loss_sent = loss_ent = 0.0
+        # sometimes the start/end positions are outside our model inputs, we ignore these terms
         loss_fct = nn.CrossEntropyLoss()
+        loss_start = loss_fct(start_logits, start_pos)
+        loss_end = loss_fct(end_logits, end_pos)
+        loss_type = loss_fct(answer_type_logits, answer_type_lbl)
+
+        losses["start"] = loss_start
+        losses["end"] = loss_end
+        losses["type"] = loss_type
+
+        return list(losses)
