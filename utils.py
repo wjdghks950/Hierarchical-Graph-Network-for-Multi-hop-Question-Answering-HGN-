@@ -4,6 +4,7 @@ import os
 
 import torch
 import numpy as np
+from collections import Counter
 
 from transformers import (
     BertConfig,
@@ -67,25 +68,19 @@ def acc_score(preds, labels):
     }
 
 
-def precision(pred, labels):
-    # tp / (tp + fp)
-    tp = sum((pred == 1) & (labels == 1))
-    fp = sum((pred == 1) & (labels == 0))
-    return tp / (tp + fp)
+def f1_score(pred, label):
+    tp = Counter(pred) & Counter(label)
+    num_tp = sum(tp.values())
+    if num_tp == 0:
+        return 0
+    prec = float(num_tp) / len(pred)
+    rec = float(num_tp) / len(label)
+    f1 = (2 * prec * rec) / (prec + rec)
+    return f1, prec, rec
 
 
-def recall(pred, labels):
-    # tp / (tp + fn)
-    tp = sum((pred == 1) & (labels == 1))
-    fn = sum((pred == 0) & (labels == 1))
-    return tp / (tp + fn)
-
-
-def f1_score(pred, labels):
-    prec = precision(pred, labels)
-    rec = recall(pred, labels)
-    f1 = 2 * (prec * rec) / (prec + rec)
-    return f1
+def exact_match(pred, label):
+    return pred == label
 
 
 class EarlyStopping():
