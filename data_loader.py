@@ -324,7 +324,7 @@ def convert_examples_to_features(args, examples, max_seq_len, tokenizer,
                         doc = nlp(sent)
                     except TypeError as e:
                         print("Error: {} / Sent: {}".format(e, sent))
-                    ent_list = [e.text.lower() for e in doc.ents]
+                    ent_list = list(set([e.text.lower() for e in doc.ents]))
                     all_ent_list.extend(ent_list)
                     sent_seq = tokenizer.tokenize(sent)
                     sent_span_list.append((sent_start, sent_start + len(sent_seq)))
@@ -334,11 +334,13 @@ def convert_examples_to_features(args, examples, max_seq_len, tokenizer,
                         for k in range(len(sent_seq) - len(ent_tok)):
                             if sent_seq[k : k + len(ent_tok)] == ent_tok:
                                 ent_span_list.append((sent_start + k, sent_start + k + len(ent_tok)))  # Entity span found
+                                break
                         ent_idx += 1
                     sent_idx += 1
                     sent_start += len(sent_seq)
 
             assert len(all_ent_list) == ent_idx
+
             all_ent_dict = dict(zip(all_ent_list, list(range(ent_idx))))  # `all_ent_dict` to assign ent_idx to question node
             q_idx = 0
             q2ent = defaultdict(list)
@@ -348,6 +350,7 @@ def convert_examples_to_features(args, examples, max_seq_len, tokenizer,
             
             span_dict = {"question": question_span, "paragraph": para_span_list, "sentence": sent_span_list, "entity": ent_span_list}
             node_indices = (q2ent, node_idx)
+            
             # print("Question span : {}".format(question_span))
             # print("Paragraph span : {}".format(para_span_list))
             # print("Sentence span : {}".format(sent_span_list))
@@ -387,12 +390,12 @@ def convert_examples_to_features(args, examples, max_seq_len, tokenizer,
                 sent_lbl = sent_lbl[:args.num_sentences]
 
             assert len(para_span_list) <= N
-            # assert len(sent_span_list) == len(sent_lbl)
             assert args.num_sentences == len(sent_lbl)
             assert args.num_paragraphs == len(para_lbl)
+            # TODO: Need ent_lbl ("...candidate entities include all entities in the question and those that match the titles in the context.")
 
             context = ' '.join([''.join(c) for c in context_selected])
-            
+
             # `answer_type_lbl`: [span, entity, yes/no]
             # `span_idx` for answer within the given context of length "n"
             if (example.answer.lower() in ["yes", "no"]) and (example._type == "comparison"):
@@ -408,6 +411,8 @@ def convert_examples_to_features(args, examples, max_seq_len, tokenizer,
                     if context_tok[sub_i : sub_i + len(answer_tok)] == answer_tok:
                         span_idx = (sub_i, sub_i + len(answer_tok))  # The answer `span_idx` (ground-truth)
 
+            print("node_idx: ", node_idx)
+            print("span_idx[entity]: ", len(span_dict["entity"]))
             # print("Question: {}".format(example.question))
             # print("Answer: {}".format(example.answer))
             # print("Answer type: {} => {}".format(example._type, answer_type_lbl))
@@ -505,7 +510,7 @@ def graph_constructor(args, node_indices, span_dict):
     pq = ("paragraph", "pq", "question")
     qe = ("question", "qe", "entity")
     eq = ("entity", "eq", "question")  # TODO: Entities within sentences could exist within the question!
-    
+
     # print("<================================== Constructing dgl.heterograph ... ==================================>")
     # print("Node_idx: ", node_idx)
     data_dict = {}
@@ -528,14 +533,19 @@ def graph_constructor(args, node_indices, span_dict):
         s2e += [(s, e) for s, e_list in sent2ent[i].items() for e in e_list]
         s_idx = list(sent2ent[i].keys())
         s2s += [(s_idx[i], s_idx[i + 1]) for i in range(len(s_idx) - 1)]
+    
+    print("node_idx: ", node_idx)
+    print("span_dict: ", len(span_dict["entity"]))
 
     if len(q2ent) > 0:
         q_idx = list(q2ent.keys())
-        assert len(q_idx) == 1
         ent_list = list(q2ent.values())[0]
         q_idx_list = q_idx * len(ent_list)
         q2e += list(zip(q_idx_list, ent_list))
-        
+    
+    else:  # No entity within the question
+        pass  # TODO: Need to handle the case where there is no entity present within the question, yet "qe" and "eq" should exist.
+
     data_dict[ps] = p2s
     data_dict[sp] = [t[::-1] for t in p2s]
     data_dict[se] = s2e
@@ -550,6 +560,11 @@ def graph_constructor(args, node_indices, span_dict):
 
     g = dgl.heterograph(data_dict, device=device)
     graph_out = (g, node_idx, span_dict)
+
+    print("Num entities (nodes vs. spans): {} / {}".format(len(g.nodes("entity")), len(span_dict["entity"])))
+
+    assert len(para_idx_list) == len(span_dict["paragraph"])
+    assert len(g.nodes("entity")) == len(span_dict["entity"])
 
     # print("data_dict: ", data_dict)
     # print("*** g *** : ", g)
